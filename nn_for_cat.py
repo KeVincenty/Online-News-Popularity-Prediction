@@ -10,11 +10,13 @@ IS_SCALE = True
 EMBEDDING_DIM_CHANNEL = 20
 EMBEDDING_DIM_DAY = 20
 EMBEDDING_DIM_WEEKEND = 20
-TRAIN_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/train.csv'
+TRAIN_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/train_27k.csv'
+VAL_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/val_3k.csv'
 TEST_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/test.csv'
-TRAIN_BATCH_SIZE = 10000
+TRAIN_BATCH_SIZE = 9000
+VAL_BATCH_SIZE = 3000
 TEST_BATCH_SIZE = 9644
-TRAIN_EPOCH = 3000
+TRAIN_EPOCH = 500
 LINEAR_HIDDEN_DIM = 200
 GRU_HIDDEN_DIM = 30
 GRU_LAYERS = 2
@@ -96,11 +98,14 @@ def scale_data(data, is_embedding=False):
 
 Trainset = NewsDataset(TRAIN_PATH, is_embedding=IS_EMBEDDING, is_test=False)
 Trainset.read_raw_data()
+Valset = NewsDataset(VAL_PATH, is_embedding=IS_EMBEDDING, is_test=False)
+Valset.read_raw_data()
 Testset = NewsDataset(TEST_PATH, is_embedding=IS_EMBEDDING, is_test=True)
 Testset.read_raw_data()
 
 TrainData = DataLoader(Trainset, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
-TestData = DataLoader(Testset, batch_size=TEST_BATCH_SIZE, shuffle=True)
+ValData = DataLoader(Valset, batch_size=TRAIN_BATCH_SIZE, shuffle=False)
+TestData = DataLoader(Testset, batch_size=TEST_BATCH_SIZE, shuffle=False)
 
 class LinearNet(nn.Module):
     def __init__(self, hidden_dim, is_embedding):
@@ -214,29 +219,28 @@ class ConvNet(nn.Module):
         x = self.linear_2(x)
         return nn.ReLU()(x)
 
-def train(traindata, model, optimizer, train_criterion, test_criterion, epochs):
+def train(traindata, valdata, model, optimizer, train_criterion, test_criterion, epochs):
     val_loss_list = []
     for epoch in range(epochs):
         for step, data in enumerate(traindata):
             inputs, label = data[0].cuda(), data[1].cuda()
             if IS_SCALE:
                 inputs = scale_data(inputs)
-            if step ==2:
-                output = model(inputs)
-                val_loss = test_criterion(output, label)
+            optimizer.zero_grad()
+            output = model(inputs)
+            loss = train_criterion(output, label)
+            loss.backward()
+            optimizer.step()
+            print('Train | epoch:', epoch, 'step:', step, 'loss:', loss.item())
+        for val_data in valdata:
+            with torch.no_grad():
+                val_inputs, val_label = val_data[0].cuda(), val_data[1].cuda()
+                if IS_SCALE:
+                    val_inputs = scale_data(val_inputs)
+                val_pred = model(val_inputs)
+                val_loss = test_criterion(val_pred, val_label)
                 val_loss_list.append(val_loss.item())
                 print('Val | epoch:', epoch, 'loss:', val_loss.item(), 'average_loss:', np.mean(val_loss_list))
-            else:
-                inputs, label = data[0].cuda(), data[1].cuda()
-                if IS_SCALE:
-                    inputs = scale_data(inputs)
-                optimizer.zero_grad()
-                output = model(inputs)
-                # breakpoint()
-                loss = train_criterion(output, label)
-                loss.backward()
-                optimizer.step()
-                print('Train | epoch:', epoch, 'step:', step, 'loss:', loss.item())
 
     return model
 
@@ -248,7 +252,7 @@ def test(testdata, model):
             inputs = scale_data(inputs)
         prediction = model(inputs)
         pred = prediction.cpu().numpy()
-        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_9.txt', pred)
+        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_val_2.txt', pred)
 
 # model = LinearNet(LINEAR_HIDDEN_DIM, IS_EMBEDDING).cuda()
 # model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING).cuda()
@@ -258,5 +262,5 @@ optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 train_criterion = nn.L1Loss()
 test_criterion = nn.L1Loss()
 
-model = train(TrainData, model, optimizer, train_criterion, test_criterion, TRAIN_EPOCH)
+model = train(TrainData, ValData, model, optimizer, train_criterion, test_criterion, TRAIN_EPOCH)
 test(TestData, model)
