@@ -14,14 +14,14 @@ TRAIN_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/train.cs
 TEST_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/test.csv'
 TRAIN_BATCH_SIZE = 10000
 TEST_BATCH_SIZE = 9644
-TRAIN_EPOCH = 300
+TRAIN_EPOCH = 3000
 LINEAR_HIDDEN_DIM = 200
 GRU_HIDDEN_DIM = 30
 GRU_LAYERS = 2
 CONV_NUM_FILTER = 10
 CONV_FILTER_SIZE = 3
 LR = 1e-2
-MOMENTUM = 0.99
+MOMENTUM = 0.9
 
 
 class NewsDataset(Dataset):
@@ -139,7 +139,7 @@ class LinearNet(nn.Module):
         x = self.linear_4(x)
         x = self.dropout(self.activation(x))
         x = self.linear_5(x)
-        return x
+        return nn.ReLU()(x)
 
 class GRUNet(nn.Module):
     def __init__(self, hidden_dim, num_layers, is_embedding):
@@ -152,8 +152,10 @@ class GRUNet(nn.Module):
             self.embedding_weekend = nn.Embedding(2, EMBEDDING_DIM_WEEKEND)
         else:
             self.input_feature = 58
-        self.gru = nn.GRU(1, hidden_dim, num_layers=num_layers, dropout=0.5)
-        self.linear = nn.Linear(hidden_dim*self.input_feature, 1)
+        self.gru = nn.GRU(1, hidden_dim, num_layers=num_layers, dropout=0.2)
+        self.linear_1 = nn.Linear(hidden_dim*self.input_feature, hidden_dim)
+        self.linear_2 = nn.Linear(hidden_dim, 1)
+        self.activation = nn.LeakyReLU()
 
     def forward(self, x):
         if self.is_embedding:
@@ -168,7 +170,10 @@ class GRUNet(nn.Module):
         x = self.gru(x)
         x = x[0].transpose(0, 1)
         x = nn.Flatten()(x)
-        return self.linear(x)
+        x = self.linear_1(x)
+        x = self.activation(x)
+        x = self.linear_2(x)
+        return nn.ReLU()(x)
 
 class ConvNet(nn.Module):
     def __init__(self, num_filters, filter_size, is_embedding):
@@ -181,9 +186,13 @@ class ConvNet(nn.Module):
             self.embedding_weekend = nn.Embedding(2, EMBEDDING_DIM_WEEKEND)
         else:
             self.input_feature = 58
-        self.conv = nn.Conv1d(1, num_filters, filter_size, padding='same')
-        self.linear = nn.Linear(self.input_feature*num_filters, 1)
+        self.conv_1 = nn.Conv1d(1, num_filters, filter_size, padding=1)
+        self.avgpool = nn.AdaptiveAvgPool1d(self.input_feature//2)
+        self.conv_2 = nn.Conv1d(num_filters, num_filters, filter_size, padding=1)
+        self.linear_1 = nn.Linear(self.input_feature//2*num_filters, 100)
+        self.linear_2 = nn.Linear(100, 1)
         self.activation = nn.LeakyReLU()
+        self.dropout = nn.Dropout(0.2)
 
     def forward(self, x):
         if self.is_embedding:
@@ -195,12 +204,18 @@ class ConvNet(nn.Module):
             embedding_w = self.embedding_weekend(x[:,36].long())
             x = torch.cat([x[:,0:11], embedding_c, x[:,17:29], embedding_d, embedding_w, x[:,37:]], dim=-1)
         x = x.unsqueeze(1)
-        x = self.conv(x)
-        x = self.activation(x)
+        x = self.conv_1(x)
+        x = self.avgpool(x)
+        x = self.conv_2(x)
         x = nn.Flatten()(x)
-        return self.linear(x)
+        x = self.activation(x)
+        x = self.linear_1(x)
+        x = self.activation(self.dropout(x))
+        x = self.linear_2(x)
+        return nn.ReLU()(x)
 
 def train(traindata, model, optimizer, train_criterion, test_criterion, epochs):
+    val_loss_list = []
     for epoch in range(epochs):
         for step, data in enumerate(traindata):
             inputs, label = data[0].cuda(), data[1].cuda()
@@ -209,7 +224,8 @@ def train(traindata, model, optimizer, train_criterion, test_criterion, epochs):
             if step ==2:
                 output = model(inputs)
                 val_loss = test_criterion(output, label)
-                print('Val | epoch:', epoch, 'loss:', val_loss.item())
+                val_loss_list.append(val_loss.item())
+                print('Val | epoch:', epoch, 'loss:', val_loss.item(), 'average_loss:', np.mean(val_loss_list))
             else:
                 inputs, label = data[0].cuda(), data[1].cuda()
                 if IS_SCALE:
@@ -232,11 +248,11 @@ def test(testdata, model):
             inputs = scale_data(inputs)
         prediction = model(inputs)
         pred = prediction.cpu().numpy()
-        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_v1.txt', pred)
+        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_9.txt', pred)
 
-model = LinearNet(LINEAR_HIDDEN_DIM, IS_EMBEDDING).cuda()
+# model = LinearNet(LINEAR_HIDDEN_DIM, IS_EMBEDDING).cuda()
 # model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING).cuda()
-# model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING).cuda()
+model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING).cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 # optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum = MOMENTUM)
 train_criterion = nn.L1Loss()
