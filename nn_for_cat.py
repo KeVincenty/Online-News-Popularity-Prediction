@@ -7,6 +7,7 @@ import torch.nn as nn
 
 IS_EMBEDDING = True
 IS_SCALE = True
+IS_GROUP = True
 EMBEDDING_DIM_CHANNEL = 20
 EMBEDDING_DIM_DAY = 20
 EMBEDDING_DIM_WEEKEND = 20
@@ -18,7 +19,7 @@ VAL_BATCH_SIZE = 3000
 TEST_BATCH_SIZE = 9644
 TRAIN_EPOCH = 500
 LINEAR_HIDDEN_DIM = 200
-GRU_HIDDEN_DIM = 30
+GRU_HIDDEN_DIM = 200
 GRU_LAYERS = 2
 CONV_NUM_FILTER = 10
 CONV_FILTER_SIZE = 3
@@ -147,9 +148,10 @@ class LinearNet(nn.Module):
         return nn.ReLU()(x)
 
 class GRUNet(nn.Module):
-    def __init__(self, hidden_dim, num_layers, is_embedding):
+    def __init__(self, hidden_dim, num_layers, is_embedding, is_group):
         super().__init__()
         self.is_embedding = is_embedding
+        self.is_group = is_group
         if is_embedding:
             self.input_feature = 44+EMBEDDING_DIM_CHANNEL+EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND
             self.embedding_channel = nn.Embedding(7, EMBEDDING_DIM_CHANNEL)
@@ -157,8 +159,18 @@ class GRUNet(nn.Module):
             self.embedding_weekend = nn.Embedding(2, EMBEDDING_DIM_WEEKEND)
         else:
             self.input_feature = 58
-        self.gru = nn.GRU(1, hidden_dim, num_layers=num_layers, dropout=0.2)
-        self.linear_1 = nn.Linear(hidden_dim*self.input_feature, hidden_dim)
+        if self.is_group:
+            self.input_dim = 100
+            self.linear_words = nn.Linear(6, self.input_dim)
+            self.linear_links = nn.Linear(5, self.input_dim)
+            self.linear_media = nn.Linear(2, self.input_dim)
+            self.linear_time = nn.Linear(EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND, self.input_dim) if self.is_embedding else nn.Linear(8, self.input_dim)
+            self.linear_keywords = nn.Linear(10+EMBEDDING_DIM_CHANNEL, self.input_dim) if self.is_embedding else nn.Linear(16, self.input_dim) 
+            self.linear_nlp = nn.Linear(21, self.input_dim)
+        else:
+            self.input_dim = 1
+        self.gru = nn.GRU(self.input_dim, hidden_dim, num_layers=num_layers, dropout=0.2)
+        self.linear_1 = nn.Linear(6*hidden_dim, hidden_dim) if self.is_group else nn.Linear(hidden_dim*self.input_feature, hidden_dim)
         self.linear_2 = nn.Linear(hidden_dim, 1)
         self.activation = nn.LeakyReLU()
 
@@ -171,19 +183,37 @@ class GRUNet(nn.Module):
             embedding_d = self.embedding_day(x[:,29:36].nonzero()[:,1])
             embedding_w = self.embedding_weekend(x[:,36].long())
             x = torch.cat([x[:,0:11], embedding_c, x[:,17:29], embedding_d, embedding_w, x[:,37:]], dim=-1)
-        x = x.T.unsqueeze(-1)
-        x = self.gru(x)
-        x = x[0].transpose(0, 1)
-        x = nn.Flatten()(x)
-        x = self.linear_1(x)
-        x = self.activation(x)
-        x = self.linear_2(x)
-        return nn.ReLU()(x)
+            # after embedding: [0:11] [11:11+EMBEDDING_DIM_CHANNEL] [11+EMBEDDING_DIM_CHANNEL:23+EMBEDDING_DIM_CHANNEL] [23+EMBEDDING_DIM_CHANNEL:23+EMBEDDING_DIM_CHANNEL+EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND] [23+EMBEDDING_DIM_CHANNEL+EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND:]
+        if self.is_group:
+            words_i = torch.cat([x[:,0:5], x[:,9].unsqueeze(-1)], dim=-1)
+            links_i = torch.cat([x[:,5:7], x[:,20+EMBEDDING_DIM_CHANNEL:23+EMBEDDING_DIM_CHANNEL]], dim=-1) if self.is_embedding else torch.cat([x[:,5:7], x[:,26:29]], dim=-1)
+            media_i = x[:,7:9]
+            time_i = torch.cat([embedding_d, embedding_w], dim=-1) if self.is_embedding else x[:,29:37] 
+            keywords_i = torch.cat([x[:,10].unsqueeze(-1), embedding_c, x[:,11+EMBEDDING_DIM_CHANNEL:20+EMBEDDING_DIM_CHANNEL]], dim=-1) if self.is_embedding else x[:,10:26] 
+            nlp_i = x[:,23+EMBEDDING_DIM_CHANNEL+EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND:] if self.is_embedding else x[:,37:]
+
+            words_v = self.linear_words(words_i).unsqueeze(0)
+            links_v = self.linear_links(links_i).unsqueeze(0)
+            media_v = self.linear_media(media_i).unsqueeze(0)
+            time_v = self.linear_time(time_i).unsqueeze(0)
+            keywords_v = self.linear_keywords(keywords_i).unsqueeze(0)
+            nlp_v = self.linear_nlp(nlp_i).unsqueeze(0)
+            input = torch.cat([words_v, links_v, media_v, time_v, keywords_v, nlp_v], dim=0)
+        else:
+            input = x.T.unsqueeze(-1)
+        input = self.gru(input)
+        input = input[0].transpose(0, 1)
+        input = nn.Flatten()(input)
+        input = self.linear_1(input)
+        input = self.activation(input)
+        input = self.linear_2(input)
+        return nn.ReLU()(input)
 
 class ConvNet(nn.Module):
-    def __init__(self, num_filters, filter_size, is_embedding):
+    def __init__(self, num_filters, filter_size, is_embedding, is_group):
         super().__init__()
         self.is_embedding = is_embedding
+        self.is_group = is_group
         if is_embedding:
             self.input_feature = 44+EMBEDDING_DIM_CHANNEL+EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND
             self.embedding_channel = nn.Embedding(7, EMBEDDING_DIM_CHANNEL)
@@ -191,7 +221,19 @@ class ConvNet(nn.Module):
             self.embedding_weekend = nn.Embedding(2, EMBEDDING_DIM_WEEKEND)
         else:
             self.input_feature = 58
-        self.conv_1 = nn.Conv1d(1, num_filters, filter_size, padding=1)
+        if self.is_group:
+            self.input_dim = 100
+            self.input_channel = 6
+            self.linear_words = nn.Linear(6, self.input_dim)
+            self.linear_links = nn.Linear(5, self.input_dim)
+            self.linear_media = nn.Linear(2, self.input_dim)
+            self.linear_time = nn.Linear(EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND, self.input_dim) if self.is_embedding else nn.Linear(8, self.input_dim)
+            self.linear_keywords = nn.Linear(10+EMBEDDING_DIM_CHANNEL, self.input_dim) if self.is_embedding else nn.Linear(16, self.input_dim) 
+            self.linear_nlp = nn.Linear(21, self.input_dim)
+        else:
+            self.input_channel = 1
+            self.input_dim = 1
+        self.conv_1 = nn.Conv1d(self.input_channel, num_filters, filter_size, padding=1)
         self.avgpool = nn.AdaptiveAvgPool1d(self.input_feature//2)
         self.conv_2 = nn.Conv1d(num_filters, num_filters, filter_size, padding=1)
         self.linear_1 = nn.Linear(self.input_feature//2*num_filters, 100)
@@ -208,16 +250,33 @@ class ConvNet(nn.Module):
             embedding_d = self.embedding_day(x[:,29:36].nonzero()[:,1])
             embedding_w = self.embedding_weekend(x[:,36].long())
             x = torch.cat([x[:,0:11], embedding_c, x[:,17:29], embedding_d, embedding_w, x[:,37:]], dim=-1)
-        x = x.unsqueeze(1)
-        x = self.conv_1(x)
-        x = self.avgpool(x)
-        x = self.conv_2(x)
-        x = nn.Flatten()(x)
-        x = self.activation(x)
-        x = self.linear_1(x)
-        x = self.activation(self.dropout(x))
-        x = self.linear_2(x)
-        return nn.ReLU()(x)
+        if self.is_group:
+            words_i = torch.cat([x[:,0:5], x[:,9].unsqueeze(-1)], dim=-1)
+            links_i = torch.cat([x[:,5:7], x[:,20+EMBEDDING_DIM_CHANNEL:23+EMBEDDING_DIM_CHANNEL]], dim=-1) if self.is_embedding else torch.cat([x[:,5:7], x[:,26:29]], dim=-1)
+            media_i = x[:,7:9]
+            time_i = torch.cat([embedding_d, embedding_w], dim=-1) if self.is_embedding else x[:,29:37] 
+            keywords_i = torch.cat([x[:,10].unsqueeze(-1), embedding_c, x[:,11+EMBEDDING_DIM_CHANNEL:20+EMBEDDING_DIM_CHANNEL]], dim=-1) if self.is_embedding else x[:,10:26] 
+            nlp_i = x[:,23+EMBEDDING_DIM_CHANNEL+EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND:] if self.is_embedding else x[:,37:]
+
+            words_v = self.linear_words(words_i).unsqueeze(1)
+            links_v = self.linear_links(links_i).unsqueeze(1)
+            media_v = self.linear_media(media_i).unsqueeze(1)
+            time_v = self.linear_time(time_i).unsqueeze(1)
+            keywords_v = self.linear_keywords(keywords_i).unsqueeze(1)
+            nlp_v = self.linear_nlp(nlp_i).unsqueeze(1)
+            input = torch.cat([words_v, links_v, media_v, time_v, keywords_v, nlp_v], dim=1)
+        else:
+            input = x.unsqueeze(1)
+
+        input = self.conv_1(input)
+        input = self.avgpool(input)
+        input = self.conv_2(input)
+        input = nn.Flatten()(input)
+        input = self.activation(input)
+        input = self.linear_1(input)
+        input = self.activation(self.dropout(input))
+        input = self.linear_2(input)
+        return nn.ReLU()(input)
 
 def train(traindata, valdata, model, optimizer, train_criterion, test_criterion, epochs):
     val_loss_list = []
@@ -252,11 +311,11 @@ def test(testdata, model):
             inputs = scale_data(inputs)
         prediction = model(inputs)
         pred = prediction.cpu().numpy()
-        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_val_2.txt', pred)
+        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_val_5.txt', pred)
 
 # model = LinearNet(LINEAR_HIDDEN_DIM, IS_EMBEDDING).cuda()
-# model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING).cuda()
-model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING).cuda()
+# model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING, IS_GROUP).cuda()
+model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING, IS_GROUP).cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 # optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum = MOMENTUM)
 train_criterion = nn.L1Loss()
