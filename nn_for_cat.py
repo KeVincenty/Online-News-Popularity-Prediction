@@ -17,7 +17,7 @@ TEST_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/test.csv'
 TRAIN_BATCH_SIZE = 9000
 VAL_BATCH_SIZE = 3000
 TEST_BATCH_SIZE = 9644
-TRAIN_EPOCH = 500
+TRAIN_EPOCH = 100
 LINEAR_HIDDEN_DIM = 200
 GRU_HIDDEN_DIM = 200
 GRU_LAYERS = 2
@@ -234,9 +234,9 @@ class ConvNet(nn.Module):
             self.input_channel = 1
             self.input_dim = 1
         self.conv_1 = nn.Conv1d(self.input_channel, num_filters, filter_size, padding=1)
-        self.avgpool = nn.AdaptiveAvgPool1d(self.input_feature//2)
+        self.avgpool = nn.AdaptiveAvgPool1d(self.input_dim//2) if self.is_group else nn.AdaptiveAvgPool1d(self.input_feature//2) 
         self.conv_2 = nn.Conv1d(num_filters, num_filters, filter_size, padding=1)
-        self.linear_1 = nn.Linear(self.input_feature//2*num_filters, 100)
+        self.linear_1 = nn.Linear(self.input_dim//2*num_filters, 100) if self.is_group else nn.Linear(self.input_feature//2*num_filters, 100)
         self.linear_2 = nn.Linear(100, 1)
         self.activation = nn.LeakyReLU()
         self.dropout = nn.Dropout(0.2)
@@ -278,6 +278,76 @@ class ConvNet(nn.Module):
         input = self.linear_2(input)
         return nn.ReLU()(input)
 
+class ConvGRUNet(nn.Module):
+    def __init__(self, num_filters, filter_size, hidden_dim, num_layers, is_embedding, is_group):
+        super().__init__()
+        self.is_embedding = is_embedding
+        self.is_group = is_group
+        if is_embedding:
+            self.input_feature = 44+EMBEDDING_DIM_CHANNEL+EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND
+            self.embedding_channel = nn.Embedding(7, EMBEDDING_DIM_CHANNEL)
+            self.embedding_day = nn.Embedding(7, EMBEDDING_DIM_DAY)
+            self.embedding_weekend = nn.Embedding(2, EMBEDDING_DIM_WEEKEND)
+        else:
+            self.input_feature = 58
+        if self.is_group:
+            self.input_dim = 100
+            self.input_channel = 6
+            self.linear_words = nn.Linear(6, self.input_dim)
+            self.linear_links = nn.Linear(5, self.input_dim)
+            self.linear_media = nn.Linear(2, self.input_dim)
+            self.linear_time = nn.Linear(EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND, self.input_dim) if self.is_embedding else nn.Linear(8, self.input_dim)
+            self.linear_keywords = nn.Linear(10+EMBEDDING_DIM_CHANNEL, self.input_dim) if self.is_embedding else nn.Linear(16, self.input_dim) 
+            self.linear_nlp = nn.Linear(21, self.input_dim)
+        else:
+            self.input_channel = 1
+            self.input_dim = 1
+        self.conv_1 = nn.Conv1d(self.input_channel, num_filters, filter_size, padding=1)
+        self.avgpool = nn.AdaptiveAvgPool1d(self.input_dim//2) if self.is_group else nn.AdaptiveAvgPool1d(self.input_feature//2) 
+        self.gru = nn.GRU(self.input_dim//2, hidden_dim, num_layers=num_layers, dropout=0.2)
+        self.linear_1 = nn.Linear(num_filters*hidden_dim, 200)
+        self.linear_2 = nn.Linear(200, 1)
+        self.activation = nn.LeakyReLU()
+        self.dropout = nn.Dropout(0.2)
+    def forward(self, x):
+        if self.is_embedding:
+            idx = x[:,11:17].nonzero()
+            embed_idx = torch.full((x.size(0),1),6).cuda()
+            embed_idx[idx[:,0]] = idx[:,1].unsqueeze(-1)
+            embedding_c = self.embedding_channel(embed_idx).squeeze(1)
+            embedding_d = self.embedding_day(x[:,29:36].nonzero()[:,1])
+            embedding_w = self.embedding_weekend(x[:,36].long())
+            x = torch.cat([x[:,0:11], embedding_c, x[:,17:29], embedding_d, embedding_w, x[:,37:]], dim=-1)
+        if self.is_group:
+            words_i = torch.cat([x[:,0:5], x[:,9].unsqueeze(-1)], dim=-1)
+            links_i = torch.cat([x[:,5:7], x[:,20+EMBEDDING_DIM_CHANNEL:23+EMBEDDING_DIM_CHANNEL]], dim=-1) if self.is_embedding else torch.cat([x[:,5:7], x[:,26:29]], dim=-1)
+            media_i = x[:,7:9]
+            time_i = torch.cat([embedding_d, embedding_w], dim=-1) if self.is_embedding else x[:,29:37] 
+            keywords_i = torch.cat([x[:,10].unsqueeze(-1), embedding_c, x[:,11+EMBEDDING_DIM_CHANNEL:20+EMBEDDING_DIM_CHANNEL]], dim=-1) if self.is_embedding else x[:,10:26] 
+            nlp_i = x[:,23+EMBEDDING_DIM_CHANNEL+EMBEDDING_DIM_DAY+EMBEDDING_DIM_WEEKEND:] if self.is_embedding else x[:,37:]
+
+            words_v = self.linear_words(words_i).unsqueeze(1)
+            links_v = self.linear_links(links_i).unsqueeze(1)
+            media_v = self.linear_media(media_i).unsqueeze(1)
+            time_v = self.linear_time(time_i).unsqueeze(1)
+            keywords_v = self.linear_keywords(keywords_i).unsqueeze(1)
+            nlp_v = self.linear_nlp(nlp_i).unsqueeze(1)
+            input = torch.cat([words_v, links_v, media_v, time_v, keywords_v, nlp_v], dim=1)
+        else:
+            input = x.unsqueeze(1)
+
+        input = self.conv_1(input)
+        input = self.avgpool(input)
+        input = input.transpose(0,1)
+        input = self.gru(input)
+        input = input[0].transpose(0, 1)
+        input = nn.Flatten()(input)
+        input = self.linear_1(input)
+        input = self.activation(input)
+        input = self.linear_2(input)
+        return nn.ReLU()(input)
+
+
 def train(traindata, valdata, model, optimizer, train_criterion, test_criterion, epochs):
     val_loss_list = []
     for epoch in range(epochs):
@@ -303,6 +373,37 @@ def train(traindata, valdata, model, optimizer, train_criterion, test_criterion,
 
     return model
 
+# def ensemble_train(traindata, valdata, models, optimizer, train_criterion, test_criterion, epochs):
+#     val_loss_list = []
+#     output_list = []
+#     val_pred_list = []
+#     assert(isinstance(models, list))
+#     for epoch in range(epochs):
+#         for step, data in enumerate(traindata):
+#             inputs, label = data[0].cuda(), data[1].cuda()
+#             if IS_SCALE:
+#                 inputs = scale_data(inputs)
+#             optimizer.zero_grad()
+#             for model in models:
+#                 output = model(inputs)
+#                 loss = train_criterion(output, label)
+#                 loss.backward()
+#                 optimizer.step()
+#             print('Train | epoch:', epoch, 'step:', step, 'loss:', loss.item())
+#         for val_data in valdata:
+#             with torch.no_grad():
+#                 val_inputs, val_label = val_data[0].cuda(), val_data[1].cuda()
+#                 if IS_SCALE:
+#                     val_inputs = scale_data(val_inputs)
+#                 for model in models:
+#                     val_pred_list.append(model(val_inputs))
+#                 val_pred = sum(val_pred_list)/2
+#                 val_loss = test_criterion(val_pred, val_label)
+#                 val_loss_list.append(val_loss.item())
+#                 print('Val | epoch:', epoch, 'loss:', val_loss.item(), 'average_loss:', np.mean(val_loss_list))
+
+#     return models
+
 @torch.no_grad()
 def test(testdata, model):
     for data, _ in testdata:
@@ -311,11 +412,23 @@ def test(testdata, model):
             inputs = scale_data(inputs)
         prediction = model(inputs)
         pred = prediction.cpu().numpy()
-        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_val_5.txt', pred)
+        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_convgru_val_1.txt', pred)
+
+# @torch.no_grad()
+# def ensemble_test(testdata, model):
+#     for data, _ in testdata:
+#         inputs = data.cuda()
+#         if IS_SCALE:
+#             inputs = scale_data(inputs)
+#         prediction = model(inputs)
+#         pred = prediction.cpu().numpy()
+#         np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_val_5.txt', pred)
+
 
 # model = LinearNet(LINEAR_HIDDEN_DIM, IS_EMBEDDING).cuda()
 # model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING, IS_GROUP).cuda()
-model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING, IS_GROUP).cuda()
+# model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING, IS_GROUP).cuda()
+model = ConvGRUNet(20, 3, 100, 2, IS_EMBEDDING, IS_GROUP).cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 # optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum = MOMENTUM)
 train_criterion = nn.L1Loss()
@@ -323,3 +436,14 @@ test_criterion = nn.L1Loss()
 
 model = train(TrainData, ValData, model, optimizer, train_criterion, test_criterion, TRAIN_EPOCH)
 test(TestData, model)
+
+# model_1 = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING, IS_GROUP).cuda()
+# model_2 = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING, IS_GROUP).cuda()
+# optimizer = torch.optim.Adam([{'params':model_1.parameters(), 'lr':1e-3}, 
+#                             {'params':model_2.parameters()}], lr=LR)
+# models = [model_1, model_2]
+# train_criterion = nn.L1Loss()
+# test_criterion = nn.L1Loss()
+
+# models = ensemble_train(TrainData, ValData, models, optimizer, train_criterion, test_criterion, TRAIN_EPOCH)
+
