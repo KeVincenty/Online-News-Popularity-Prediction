@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 
-IS_EMBEDDING = True
+IS_EMBEDDING = False
 IS_SCALE = True
 IS_GROUP = True
 EMBEDDING_DIM_CHANNEL = 20
@@ -13,19 +13,21 @@ EMBEDDING_DIM_DAY = 20
 EMBEDDING_DIM_WEEKEND = 20
 TRAIN_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/train_27k.csv'
 VAL_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/val_3k.csv'
-TEST_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/test.csv'
+TEST_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/test_full.csv'
 TRAIN_BATCH_SIZE = 9000
 VAL_BATCH_SIZE = 3000
 TEST_BATCH_SIZE = 9644
-TRAIN_EPOCH = 100
-LINEAR_HIDDEN_DIM = 200
-GRU_HIDDEN_DIM = 200
+TRAIN_EPOCH = 150
+LINEAR_HIDDEN_DIM = 256
+GRU_HIDDEN_DIM = 256
 GRU_LAYERS = 2
-CONV_NUM_FILTER = 10
+CONV_NUM_FILTER = 20
 CONV_FILTER_SIZE = 3
-LR = 1e-2
+LR = 1e-3
 MOMENTUM = 0.9
 
+torch.manual_seed(226)
+np.random.seed(226)
 
 class NewsDataset(Dataset):
     def __init__(self, data_path, is_embedding=False, is_test=False):
@@ -101,7 +103,7 @@ Trainset = NewsDataset(TRAIN_PATH, is_embedding=IS_EMBEDDING, is_test=False)
 Trainset.read_raw_data()
 Valset = NewsDataset(VAL_PATH, is_embedding=IS_EMBEDDING, is_test=False)
 Valset.read_raw_data()
-Testset = NewsDataset(TEST_PATH, is_embedding=IS_EMBEDDING, is_test=True)
+Testset = NewsDataset(TEST_PATH, is_embedding=IS_EMBEDDING, is_test=False)
 Testset.read_raw_data()
 
 TrainData = DataLoader(Trainset, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
@@ -160,7 +162,7 @@ class GRUNet(nn.Module):
         else:
             self.input_feature = 58
         if self.is_group:
-            self.input_dim = 100
+            self.input_dim = 128
             self.linear_words = nn.Linear(6, self.input_dim)
             self.linear_links = nn.Linear(5, self.input_dim)
             self.linear_media = nn.Linear(2, self.input_dim)
@@ -236,8 +238,8 @@ class ConvNet(nn.Module):
         self.conv_1 = nn.Conv1d(self.input_channel, num_filters, filter_size, padding=1)
         self.avgpool = nn.AdaptiveAvgPool1d(self.input_dim//2) if self.is_group else nn.AdaptiveAvgPool1d(self.input_feature//2) 
         self.conv_2 = nn.Conv1d(num_filters, num_filters, filter_size, padding=1)
-        self.linear_1 = nn.Linear(self.input_dim//2*num_filters, 100) if self.is_group else nn.Linear(self.input_feature//2*num_filters, 100)
-        self.linear_2 = nn.Linear(100, 1)
+        self.linear_1 = nn.Linear(self.input_dim//2*num_filters, 128) if self.is_group else nn.Linear(self.input_feature//2*num_filters, 128)
+        self.linear_2 = nn.Linear(128, 1)
         self.activation = nn.LeakyReLU()
         self.dropout = nn.Dropout(0.2)
 
@@ -291,7 +293,7 @@ class ConvGRUNet(nn.Module):
         else:
             self.input_feature = 58
         if self.is_group:
-            self.input_dim = 100
+            self.input_dim = 128
             self.input_channel = 6
             self.linear_words = nn.Linear(6, self.input_dim)
             self.linear_links = nn.Linear(5, self.input_dim)
@@ -304,9 +306,10 @@ class ConvGRUNet(nn.Module):
             self.input_dim = 1
         self.conv_1 = nn.Conv1d(self.input_channel, num_filters, filter_size, padding=1)
         self.avgpool = nn.AdaptiveAvgPool1d(self.input_dim//2) if self.is_group else nn.AdaptiveAvgPool1d(self.input_feature//2) 
+        self.conv_2 = nn.Conv1d(num_filters, num_filters, filter_size, padding=1)
         self.gru = nn.GRU(self.input_dim//2, hidden_dim, num_layers=num_layers, dropout=0.2)
-        self.linear_1 = nn.Linear(num_filters*hidden_dim, 200)
-        self.linear_2 = nn.Linear(200, 1)
+        self.linear_1 = nn.Linear(num_filters*hidden_dim, 256)
+        self.linear_2 = nn.Linear(256, 1)
         self.activation = nn.LeakyReLU()
         self.dropout = nn.Dropout(0.2)
     def forward(self, x):
@@ -338,6 +341,7 @@ class ConvGRUNet(nn.Module):
 
         input = self.conv_1(input)
         input = self.avgpool(input)
+        input = self.conv_2(input)
         input = input.transpose(0,1)
         input = self.gru(input)
         input = input[0].transpose(0, 1)
@@ -355,6 +359,7 @@ def train(traindata, valdata, model, optimizer, train_criterion, test_criterion,
             inputs, label = data[0].cuda(), data[1].cuda()
             if IS_SCALE:
                 inputs = scale_data(inputs)
+                # label = (label-3511.3160333333335)/12613.34105595961 # total:3395.3801836343455/11626.804105728816 train:3511.3160333333335/12613.34105595961 test:3034.7336167565327/7785.9506193221105
             optimizer.zero_grad()
             output = model(inputs)
             loss = train_criterion(output, label)
@@ -405,14 +410,16 @@ def train(traindata, valdata, model, optimizer, train_criterion, test_criterion,
 #     return models
 
 @torch.no_grad()
-def test(testdata, model):
-    for data, _ in testdata:
-        inputs = data.cuda()
+def test(testdata, model, test_criterion=None):
+    for data in testdata:
+        inputs, targets = data[0].cuda(), data[1].cuda()
         if IS_SCALE:
             inputs = scale_data(inputs)
         prediction = model(inputs)
+        loss = test_criterion(prediction, targets)
+        print('Test | ','loss:', loss.item())
         pred = prediction.cpu().numpy()
-        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_convgru_val_1.txt', pred)
+        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_convgru_final_4.txt', pred)
 
 # @torch.no_grad()
 # def ensemble_test(testdata, model):
@@ -424,18 +431,18 @@ def test(testdata, model):
 #         pred = prediction.cpu().numpy()
 #         np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_val_5.txt', pred)
 
+with torch.cuda.device(1):
+    # model = LinearNet(LINEAR_HIDDEN_DIM, IS_EMBEDDING).cuda() 
+    model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING, IS_GROUP).cuda()
+    # model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING, IS_GROUP).cuda()
+    # model = ConvGRUNet(20, 3, 256, 2, IS_EMBEDDING, IS_GROUP).cuda()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum = MOMENTUM)
+    train_criterion = nn.L1Loss()
+    test_criterion = nn.L1Loss()
 
-# model = LinearNet(LINEAR_HIDDEN_DIM, IS_EMBEDDING).cuda()
-# model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING, IS_GROUP).cuda()
-# model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING, IS_GROUP).cuda()
-model = ConvGRUNet(20, 3, 100, 2, IS_EMBEDDING, IS_GROUP).cuda()
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-# optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum = MOMENTUM)
-train_criterion = nn.L1Loss()
-test_criterion = nn.L1Loss()
-
-model = train(TrainData, ValData, model, optimizer, train_criterion, test_criterion, TRAIN_EPOCH)
-test(TestData, model)
+    model = train(TrainData, ValData, model, optimizer, train_criterion, test_criterion, TRAIN_EPOCH)
+    test(TestData, model, test_criterion)
 
 # model_1 = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING, IS_GROUP).cuda()
 # model_2 = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING, IS_GROUP).cuda()
