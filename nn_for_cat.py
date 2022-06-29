@@ -17,7 +17,7 @@ TEST_PATH = '/home/yinyuan/workspace/Online-News-Popularity-Prediction/test_full
 TRAIN_BATCH_SIZE = 9000
 VAL_BATCH_SIZE = 3000
 TEST_BATCH_SIZE = 9644
-TRAIN_EPOCH = 150
+TRAIN_EPOCH = 200
 LINEAR_HIDDEN_DIM = 256
 GRU_HIDDEN_DIM = 256
 GRU_LAYERS = 2
@@ -307,11 +307,11 @@ class ConvGRUNet(nn.Module):
         self.conv_1 = nn.Conv1d(self.input_channel, num_filters, filter_size, padding=1)
         self.avgpool = nn.AdaptiveAvgPool1d(self.input_dim//2) if self.is_group else nn.AdaptiveAvgPool1d(self.input_feature//2) 
         self.conv_2 = nn.Conv1d(num_filters, num_filters, filter_size, padding=1)
-        self.gru = nn.GRU(self.input_dim//2, hidden_dim, num_layers=num_layers, dropout=0.2)
+        self.gru = nn.GRU(self.input_dim//2, hidden_dim, num_layers=num_layers, dropout=0.5)
         self.linear_1 = nn.Linear(num_filters*hidden_dim, 256)
         self.linear_2 = nn.Linear(256, 1)
         self.activation = nn.LeakyReLU()
-        self.dropout = nn.Dropout(0.2)
+        self.dropout = nn.Dropout(0.5)
     def forward(self, x):
         if self.is_embedding:
             idx = x[:,11:17].nonzero()
@@ -419,7 +419,7 @@ def test(testdata, model, test_criterion=None):
         loss = test_criterion(prediction, targets)
         print('Test | ','loss:', loss.item())
         pred = prediction.cpu().numpy()
-        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_convgru_final_4.txt', pred)
+        np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_convgru_final_5.txt', pred)
 
 # @torch.no_grad()
 # def ensemble_test(testdata, model):
@@ -431,16 +431,19 @@ def test(testdata, model, test_criterion=None):
 #         pred = prediction.cpu().numpy()
 #         np.savetxt('/home/yinyuan/workspace/Online-News-Popularity-Prediction/results_conv1d_val_5.txt', pred)
 
-with torch.cuda.device(1):
+with torch.cuda.device(7):
     # model = LinearNet(LINEAR_HIDDEN_DIM, IS_EMBEDDING).cuda() 
-    model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING, IS_GROUP).cuda()
+    # model = GRUNet(GRU_HIDDEN_DIM, GRU_LAYERS, IS_EMBEDDING, IS_GROUP).cuda()
     # model = ConvNet(CONV_NUM_FILTER, CONV_FILTER_SIZE, IS_EMBEDDING, IS_GROUP).cuda()
-    # model = ConvGRUNet(20, 3, 256, 2, IS_EMBEDDING, IS_GROUP).cuda()
+    model = ConvGRUNet(20, 3, 256, 2, IS_EMBEDDING, IS_GROUP).cuda()
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     # optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum = MOMENTUM)
     train_criterion = nn.L1Loss()
     test_criterion = nn.L1Loss()
 
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'Total number of parameters: {pytorch_total_params/1000**2}M')
+    breakpoint()
     model = train(TrainData, ValData, model, optimizer, train_criterion, test_criterion, TRAIN_EPOCH)
     test(TestData, model, test_criterion)
 
